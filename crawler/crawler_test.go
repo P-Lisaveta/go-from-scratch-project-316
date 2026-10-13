@@ -45,12 +45,14 @@ func TestAnalyze(t *testing.T) {
 	require.Equal(t, "https://example.test", actual.RootURL)
 	require.Equal(t, 1, actual.Depth)
 	require.NotEmpty(t, actual.GeneratedAt)
-	require.Equal(t, []crawler.Page{{
-		URL:        "https://example.test",
-		Depth:      0,
-		HTTPStatus: http.StatusOK,
-		Status:     "ok",
-	}}, actual.Pages)
+	require.Len(t, actual.Pages, 1)
+	require.Equal(t, "https://example.test", actual.Pages[0].URL)
+	require.Equal(t, 0, actual.Pages[0].Depth)
+	require.Equal(t, http.StatusOK, actual.Pages[0].HTTPStatus)
+	require.Equal(t, "ok", actual.Pages[0].Status)
+	require.Empty(t, actual.Pages[0].Error)
+	require.Empty(t, actual.Pages[0].BrokenLinks)
+	require.NotEmpty(t, actual.Pages[0].DiscoveredAt)
 }
 
 func TestAnalyzeCapturesNetworkErrorInReport(t *testing.T) {
@@ -68,11 +70,9 @@ func TestAnalyzeCapturesNetworkErrorInReport(t *testing.T) {
 
 	require.NoError(t, err)
 	actual := decodeReport(t, report)
-	require.Equal(t, []crawler.Page{{
-		URL:    "https://example.test",
-		Status: "error",
-		Error:  `Get "https://example.test": network unavailable`,
-	}}, actual.Pages)
+	require.Len(t, actual.Pages, 1)
+	require.Equal(t, "error", actual.Pages[0].Status)
+	require.Contains(t, actual.Pages[0].Error, "network unavailable")
 }
 
 func TestAnalyzeCapturesErrorHTTPStatusInReport(t *testing.T) {
@@ -104,12 +104,10 @@ func TestAnalyzeCapturesErrorHTTPStatusInReport(t *testing.T) {
 
 			require.NoError(t, err)
 			actual := decodeReport(t, report)
-			require.Equal(t, []crawler.Page{{
-				URL:        "https://example.test",
-				HTTPStatus: testCase.status,
-				Status:     "error",
-				Error:      "unexpected http status: " + strconv.Itoa(testCase.status),
-			}}, actual.Pages)
+			require.Len(t, actual.Pages, 1)
+			require.Equal(t, testCase.status, actual.Pages[0].HTTPStatus)
+			require.Equal(t, "error", actual.Pages[0].Status)
+			require.Equal(t, "unexpected http status: "+strconv.Itoa(testCase.status), actual.Pages[0].Error)
 		})
 	}
 }
@@ -134,6 +132,55 @@ func TestAnalyzeCapturesTimeoutInReport(t *testing.T) {
 	require.Contains(t, actual.Pages[0].Error, context.DeadlineExceeded.Error())
 }
 
+func TestAnalyzeReportsOnlyBrokenLinks(t *testing.T) {
+	t.Parallel()
+
+	requests := make(map[string]int)
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		requests[request.URL.String()]++
+
+		switch request.URL.String() {
+		case "https://simple.test/blog/index.html":
+			return htmlResponse(http.StatusOK, `
+				<a href="/assets/working.css">working</a>
+				<a href="/assets/ghost.css">missing</a>
+				<a href="https://cdn.simple.test/app.js">unavailable</a>
+				<a href="">empty</a>
+				<a href="mailto:help@simple.test">email</a>
+				<a href="javascript:void(0)">script</a>
+				<a href="#section">fragment</a>
+			`)
+		case "https://simple.test/assets/working.css":
+			return htmlResponse(http.StatusOK, "ok")
+		case "https://simple.test/assets/ghost.css":
+			return htmlResponse(http.StatusNotFound, "not found")
+		case "https://cdn.simple.test/app.js":
+			return nil, errors.New("host unavailable")
+		default:
+			return nil, errors.New("unexpected request")
+		}
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://simple.test/blog/index.html",
+		Depth:      2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Len(t, actual.Pages, 1)
+	require.Equal(t, "ok", actual.Pages[0].Status)
+	require.Equal(t, []crawler.BrokenLink{
+		{URL: "https://simple.test/assets/ghost.css", StatusCode: http.StatusNotFound},
+		{URL: "https://cdn.simple.test/app.js", Error: `Get "https://cdn.simple.test/app.js": host unavailable`},
+	}, actual.Pages[0].BrokenLinks)
+	require.Equal(t, 4, len(requests))
+	require.Zero(t, requests["mailto:help@simple.test"])
+	require.Zero(t, requests["https://simple.test/blog/index.html#section"])
+}
+
 func decodeReport(t testing.TB, report []byte) crawler.Report {
 	t.Helper()
 
@@ -147,4 +194,12 @@ type roundTripper func(*http.Request) (*http.Response, error)
 
 func (f roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+func htmlResponse(status int, body string) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
 }

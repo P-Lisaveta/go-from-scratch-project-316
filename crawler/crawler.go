@@ -2,6 +2,7 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // Options controls an analysis run.
@@ -37,11 +41,20 @@ type Report struct {
 
 // Page holds the result of requesting one page.
 type Page struct {
+	URL          string       `json:"url"`
+	Depth        int          `json:"depth"`
+	HTTPStatus   int          `json:"http_status"`
+	Status       string       `json:"status"`
+	Error        string       `json:"error"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
+	DiscoveredAt string       `json:"discovered_at"`
+}
+
+// BrokenLink describes an unavailable link discovered on a page.
+type BrokenLink struct {
 	URL        string `json:"url"`
-	Depth      int    `json:"depth"`
-	HTTPStatus int    `json:"http_status"`
-	Status     string `json:"status"`
-	Error      string `json:"error"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Analyze runs a crawl and serializes its current results as JSON.
@@ -72,8 +85,10 @@ func newCrawler(opts Options) *crawler {
 
 func (c *crawler) crawl(ctx context.Context) Report {
 	page := Page{
-		URL:   c.opts.URL,
-		Depth: 0,
+		URL:          c.opts.URL,
+		Depth:        0,
+		BrokenLinks:  make([]BrokenLink, 0),
+		DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	if !c.visit(page.URL) {
@@ -106,21 +121,66 @@ func (c *crawler) visit(rawURL string) bool {
 }
 
 func (c *crawler) fetch(ctx context.Context, page Page) Page {
+	status, document, err := c.do(ctx, page.URL, true)
+	if err != nil {
+		page.Status = "error"
+		page.Error = err.Error()
+		return page
+	}
+
+	page.HTTPStatus = status
+	if status < http.StatusOK || status >= http.StatusBadRequest {
+		page.Status = "error"
+		page.Error = fmt.Sprintf("unexpected http status: %d", status)
+		return page
+	}
+
+	brokenLinks, err := c.findBrokenLinks(ctx, page.URL, document)
+	if err != nil {
+		page.Status = "error"
+		page.Error = err.Error()
+		return page
+	}
+	page.Status = "ok"
+	page.BrokenLinks = brokenLinks
+
+	return page
+}
+
+func (c *crawler) findBrokenLinks(ctx context.Context, pageURL string, document []byte) ([]BrokenLink, error) {
+	links, err := extractLinks(pageURL, document)
+	if err != nil {
+		return nil, err
+	}
+
+	brokenLinks := make([]BrokenLink, 0)
+	for _, link := range links {
+		status, _, err := c.do(ctx, link, false)
+		if err != nil {
+			brokenLinks = append(brokenLinks, BrokenLink{URL: link, Error: err.Error()})
+			continue
+		}
+		if status >= http.StatusBadRequest {
+			brokenLinks = append(brokenLinks, BrokenLink{URL: link, StatusCode: status})
+		}
+	}
+
+	return brokenLinks, nil
+}
+
+func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (int, []byte, error) {
 	attempts := c.opts.Retries + 1
+	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := c.waitForRequest(ctx); err != nil {
-			page.Status = "error"
-			page.Error = err.Error()
-			return page
+			return 0, nil, err
 		}
 
 		requestCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
-		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, page.URL, nil)
+		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			cancel()
-			page.Status = "error"
-			page.Error = err.Error()
-			return page
+			return 0, nil, err
 		}
 		if c.opts.UserAgent != "" {
 			request.Header.Set("User-Agent", c.opts.UserAgent)
@@ -129,31 +189,26 @@ func (c *crawler) fetch(ctx context.Context, page Page) Page {
 		response, err := c.opts.HTTPClient.Do(request)
 		if err != nil {
 			cancel()
-			page.Status = "error"
-			page.Error = err.Error()
+			lastErr = err
 			continue
 		}
 
-		page.HTTPStatus = response.StatusCode
-		bodyErr := closeResponseBody(response.Body)
+		var body []byte
+		if readBody {
+			body, err = readResponseBody(response.Body)
+		} else {
+			err = closeResponseBody(response.Body)
+		}
 		cancel()
-		if bodyErr != nil {
-			page.Status = "error"
-			page.Error = bodyErr.Error()
+		if err != nil {
+			lastErr = err
 			continue
 		}
-		if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusBadRequest {
-			page.Status = "ok"
-			page.Error = ""
-			return page
-		}
 
-		page.Status = "error"
-		page.Error = fmt.Sprintf("unexpected http status: %d", response.StatusCode)
-		return page
+		return response.StatusCode, body, nil
 	}
 
-	return page
+	return 0, nil, lastErr
 }
 
 func (c *crawler) waitForRequest(ctx context.Context) error {
@@ -216,6 +271,73 @@ func closeResponseBody(body io.ReadCloser) error {
 	closeErr := body.Close()
 
 	return errors.Join(copyErr, closeErr)
+}
+
+func readResponseBody(body io.ReadCloser) ([]byte, error) {
+	content, readErr := io.ReadAll(body)
+	closeErr := body.Close()
+
+	return content, errors.Join(readErr, closeErr)
+}
+
+func extractLinks(pageURL string, document []byte) ([]string, error) {
+	baseURL, err := url.Parse(pageURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse page url: %w", err)
+	}
+
+	node, err := html.Parse(bytes.NewReader(document))
+	if err != nil {
+		return nil, fmt.Errorf("parse html: %w", err)
+	}
+
+	links := make([]string, 0)
+	seen := make(map[string]struct{})
+	collectLinks(node, baseURL, seen, &links)
+
+	return links, nil
+}
+
+func collectLinks(node *html.Node, baseURL *url.URL, seen map[string]struct{}, links *[]string) {
+	if node.Type == html.ElementNode && (node.Data == "a" || node.Data == "area") {
+		for _, attr := range node.Attr {
+			if attr.Key != "href" {
+				continue
+			}
+			absoluteURL, ok := absoluteHTTPURL(baseURL, attr.Val)
+			if !ok {
+				continue
+			}
+			if _, exists := seen[absoluteURL]; exists {
+				continue
+			}
+			seen[absoluteURL] = struct{}{}
+			*links = append(*links, absoluteURL)
+		}
+	}
+
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		collectLinks(child, baseURL, seen, links)
+	}
+}
+
+func absoluteHTTPURL(baseURL *url.URL, rawURL string) (string, bool) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || strings.HasPrefix(rawURL, "#") {
+		return "", false
+	}
+
+	link, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	link = baseURL.ResolveReference(link)
+	if (link.Scheme != "http" && link.Scheme != "https") || link.Host == "" {
+		return "", false
+	}
+	link.Fragment = ""
+
+	return link.String(), true
 }
 
 func marshalReport(report Report, indent bool) ([]byte, error) {
