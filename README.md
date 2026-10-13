@@ -13,16 +13,28 @@
 
 ## Установка
 
-<!-- Опишите установку: клонирование, зависимости, переменные окружения -->
-
 ```bash
 git clone https://github.com/P-Lisaveta/go-from-scratch-project-316.git
 cd go-from-scratch-project-316
+make build
 ```
 
 ## Использование
 
-<!-- Добавьте примеры запуска и запись asciinema — именно это смотрит работодатель -->
+Запустите анализ сайта через `make`:
+
+```bash
+make run URL=https://example.com
+```
+
+Или запустите CLI напрямую:
+
+```bash
+go run ./cmd/hexlet-go-crawler --depth 2 --workers 8 https://example.com
+go run ./cmd/hexlet-go-crawler --help
+```
+
+Команда `make test` запускает все автоматические тесты. Результат работы — JSON-отчёт с URL корневой страницы, временем формирования и статусом первого HTTP-запроса.
 
 ---
 
