@@ -181,6 +181,56 @@ func TestAnalyzeReportsOnlyBrokenLinks(t *testing.T) {
 	require.Zero(t, requests["https://simple.test/blog/index.html#section"])
 }
 
+func TestAnalyzeCollectsSEO(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		return htmlResponse(http.StatusOK, `
+			<html>
+				<head>
+					<title> Example &amp; test </title>
+					<meta name="description" content=" Build &amp; ship ">
+				</head>
+				<body><h1> Hello <span>world</span> </h1></body>
+			</html>
+		`)
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Equal(t, crawler.SEO{
+		HasTitle:       true,
+		Title:          "Example & test",
+		HasDescription: true,
+		Description:    "Build & ship",
+		HasH1:          true,
+	}, actual.Pages[0].SEO)
+}
+
+func TestAnalyzeReportsMissingSEO(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		return htmlResponse(http.StatusOK, "<html><body><p>content</p></body></html>")
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Equal(t, crawler.SEO{}, actual.Pages[0].SEO)
+}
+
 func decodeReport(t testing.TB, report []byte) crawler.Report {
 	t.Helper()
 

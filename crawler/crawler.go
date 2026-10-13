@@ -48,6 +48,7 @@ type Page struct {
 	Error        string       `json:"error"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	DiscoveredAt string       `json:"discovered_at"`
+	SEO          SEO          `json:"seo"`
 }
 
 // BrokenLink describes an unavailable link discovered on a page.
@@ -55,6 +56,15 @@ type BrokenLink struct {
 	URL        string `json:"url"`
 	StatusCode int    `json:"status_code,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// SEO contains basic search-engine optimization data found on a page.
+type SEO struct {
+	HasTitle       bool   `json:"has_title"`
+	Title          string `json:"title"`
+	HasDescription bool   `json:"has_description"`
+	Description    string `json:"description"`
+	HasH1          bool   `json:"has_h1"`
 }
 
 // Analyze runs a crawl and serializes its current results as JSON.
@@ -141,8 +151,15 @@ func (c *crawler) fetch(ctx context.Context, page Page) Page {
 		page.Error = err.Error()
 		return page
 	}
+	seo, err := extractSEO(document)
+	if err != nil {
+		page.Status = "error"
+		page.Error = err.Error()
+		return page
+	}
 	page.Status = "ok"
 	page.BrokenLinks = brokenLinks
+	page.SEO = seo
 
 	return page
 }
@@ -338,6 +355,75 @@ func absoluteHTTPURL(baseURL *url.URL, rawURL string) (string, bool) {
 	link.Fragment = ""
 
 	return link.String(), true
+}
+
+func extractSEO(document []byte) (SEO, error) {
+	node, err := html.Parse(bytes.NewReader(document))
+	if err != nil {
+		return SEO{}, fmt.Errorf("parse html: %w", err)
+	}
+
+	seo := SEO{}
+	collectSEO(node, &seo)
+
+	return seo, nil
+}
+
+func collectSEO(node *html.Node, seo *SEO) {
+	if node.Type == html.ElementNode {
+		switch node.Data {
+		case "title":
+			if !seo.HasTitle {
+				seo.HasTitle = true
+				seo.Title = nodeText(node)
+			}
+		case "h1":
+			if !seo.HasH1 {
+				seo.HasH1 = true
+			}
+		case "meta":
+			if !seo.HasDescription && isDescriptionMeta(node) {
+				seo.HasDescription = true
+				seo.Description = normalizedAttribute(node, "content")
+			}
+		}
+	}
+
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		collectSEO(child, seo)
+	}
+}
+
+func isDescriptionMeta(node *html.Node) bool {
+	return strings.EqualFold(normalizedAttribute(node, "name"), "description")
+}
+
+func normalizedAttribute(node *html.Node, key string) string {
+	for _, attr := range node.Attr {
+		if strings.EqualFold(attr.Key, key) {
+			return strings.Join(strings.Fields(attr.Val), " ")
+		}
+	}
+
+	return ""
+}
+
+func nodeText(node *html.Node) string {
+	var text strings.Builder
+	collectText(node, &text)
+
+	return strings.Join(strings.Fields(text.String()), " ")
+}
+
+func collectText(node *html.Node, text *strings.Builder) {
+	if node.Type == html.TextNode {
+		text.WriteString(node.Data)
+		text.WriteByte(' ')
+	}
+
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		collectText(child, text)
+	}
 }
 
 func marshalReport(report Report, indent bool) ([]byte, error) {
