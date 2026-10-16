@@ -86,6 +86,11 @@ type crawler struct {
 	nextRequest time.Time
 }
 
+type crawlTask struct {
+	URL   string
+	Depth int
+}
+
 func newCrawler(opts Options) *crawler {
 	return &crawler{
 		opts:    opts,
@@ -94,29 +99,50 @@ func newCrawler(opts Options) *crawler {
 }
 
 func (c *crawler) crawl(ctx context.Context) Report {
-	page := Page{
-		URL:          c.opts.URL,
-		Depth:        0,
+	rootURL, _ := url.Parse(c.opts.URL)
+	c.visit(c.opts.URL)
+
+	queue := []crawlTask{{URL: c.opts.URL, Depth: 0}}
+	pages := make([]Page, 0, 1)
+	for len(queue) > 0 {
+		if ctx.Err() != nil {
+			break
+		}
+
+		task := queue[0]
+		queue = queue[1:]
+		page, links := c.fetch(ctx, c.newPage(task))
+		pages = append(pages, page)
+
+		if task.Depth+1 >= c.opts.Depth {
+			continue
+		}
+		for _, link := range links {
+			if !sameDomain(rootURL, link) || !c.visit(link) {
+				continue
+			}
+			queue = append(queue, crawlTask{URL: link, Depth: task.Depth + 1})
+		}
+	}
+
+	return c.newReport(pages)
+}
+
+func (c *crawler) newPage(task crawlTask) Page {
+	return Page{
+		URL:          task.URL,
+		Depth:        task.Depth,
 		BrokenLinks:  make([]BrokenLink, 0),
 		DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
-
-	if !c.visit(page.URL) {
-		page.Status = "skipped"
-		return c.newReport(page)
-	}
-
-	page = c.fetch(ctx, page)
-
-	return c.newReport(page)
 }
 
-func (c *crawler) newReport(page Page) Report {
+func (c *crawler) newReport(pages []Page) Report {
 	return Report{
 		RootURL:     c.opts.URL,
 		Depth:       c.opts.Depth,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Pages:       []Page{page},
+		Pages:       pages,
 	}
 }
 
@@ -130,50 +156,57 @@ func (c *crawler) visit(rawURL string) bool {
 	return true
 }
 
-func (c *crawler) fetch(ctx context.Context, page Page) Page {
+func (c *crawler) fetch(ctx context.Context, page Page) (Page, []string) {
 	status, document, err := c.do(ctx, page.URL, true)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
-		return page
+		return page, nil
 	}
 
 	page.HTTPStatus = status
 	if status < http.StatusOK || status >= http.StatusBadRequest {
 		page.Status = "error"
 		page.Error = fmt.Sprintf("unexpected http status: %d", status)
-		return page
+		return page, nil
 	}
 
-	brokenLinks, err := c.findBrokenLinks(ctx, page.URL, document)
+	links, err := extractLinks(page.URL, document)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
-		return page
+		return page, nil
+	}
+	brokenLinks, err := c.findBrokenLinks(ctx, links)
+	if err != nil {
+		page.Status = "error"
+		page.Error = err.Error()
+		return page, nil
 	}
 	seo, err := extractSEO(document)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
-		return page
+		return page, nil
 	}
 	page.Status = "ok"
 	page.BrokenLinks = brokenLinks
 	page.SEO = seo
 
-	return page
+	return page, links
 }
 
-func (c *crawler) findBrokenLinks(ctx context.Context, pageURL string, document []byte) ([]BrokenLink, error) {
-	links, err := extractLinks(pageURL, document)
-	if err != nil {
-		return nil, err
-	}
-
+func (c *crawler) findBrokenLinks(ctx context.Context, links []string) ([]BrokenLink, error) {
 	brokenLinks := make([]BrokenLink, 0)
 	for _, link := range links {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		status, _, err := c.do(ctx, link, false)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			brokenLinks = append(brokenLinks, BrokenLink{URL: link, Error: err.Error()})
 			continue
 		}
@@ -183,6 +216,15 @@ func (c *crawler) findBrokenLinks(ctx context.Context, pageURL string, document 
 	}
 
 	return brokenLinks, nil
+}
+
+func sameDomain(rootURL *url.URL, rawURL string) bool {
+	link, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+
+	return strings.EqualFold(rootURL.Host, link.Host)
 }
 
 func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (int, []byte, error) {

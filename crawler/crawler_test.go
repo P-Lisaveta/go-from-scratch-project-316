@@ -163,7 +163,7 @@ func TestAnalyzeReportsOnlyBrokenLinks(t *testing.T) {
 
 	report, err := crawler.Analyze(t.Context(), crawler.Options{
 		URL:        "https://simple.test/blog/index.html",
-		Depth:      2,
+		Depth:      1,
 		Timeout:    time.Second,
 		HTTPClient: client,
 	})
@@ -229,6 +229,91 @@ func TestAnalyzeReportsMissingSEO(t *testing.T) {
 	require.NoError(t, err)
 	actual := decodeReport(t, report)
 	require.Equal(t, crawler.SEO{}, actual.Pages[0].SEO)
+}
+
+func TestAnalyzeCrawlsInternalPagesWithinDepth(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name          string
+		depth         int
+		expectedPages []string
+	}{
+		{
+			name:          "start page only",
+			depth:         1,
+			expectedPages: []string{"https://simple.test"},
+		},
+		{
+			name:  "first-level internal pages",
+			depth: 2,
+			expectedPages: []string{
+				"https://simple.test",
+				"https://simple.test/first",
+				"https://simple.test/second",
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+				switch request.URL.String() {
+				case "https://simple.test":
+					return htmlResponse(http.StatusOK, `
+						<a href="/first">first</a>
+						<a href="/first">first duplicate</a>
+						<a href="/second">second</a>
+						<a href="https://external.test/page">external</a>
+					`)
+				case "https://simple.test/first", "https://simple.test/second", "https://external.test/page":
+					return htmlResponse(http.StatusOK, "<html></html>")
+				default:
+					return nil, errors.New("unexpected request")
+				}
+			})}
+
+			report, err := crawler.Analyze(t.Context(), crawler.Options{
+				URL:        "https://simple.test",
+				Depth:      testCase.depth,
+				Timeout:    time.Second,
+				HTTPClient: client,
+			})
+
+			require.NoError(t, err)
+			actual := decodeReport(t, report)
+			require.Len(t, actual.Pages, len(testCase.expectedPages))
+			for index, expectedURL := range testCase.expectedPages {
+				expectedDepth := 1
+				if index == 0 {
+					expectedDepth = 0
+				}
+				require.Equal(t, expectedURL, actual.Pages[index].URL)
+				require.Equal(t, expectedDepth, actual.Pages[index].Depth)
+			}
+		})
+	}
+}
+
+func TestAnalyzeReturnsReportWhenContextIsCanceled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("request must not be sent")
+	})}
+
+	report, err := crawler.Analyze(ctx, crawler.Options{
+		URL:        "https://simple.test",
+		Depth:      2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Empty(t, actual.Pages)
 }
 
 func decodeReport(t testing.TB, report []byte) crawler.Report {
