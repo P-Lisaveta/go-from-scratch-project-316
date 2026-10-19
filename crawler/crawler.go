@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -252,6 +253,9 @@ func (c *crawler) fetch(ctx context.Context, page Page) (Page, []string) {
 		page.Status = "error"
 		page.Error = err.Error()
 		return page, nil
+	}
+	if len(brokenLinks) > 1 {
+		fmt.Fprintf(os.Stderr, "crawler: broken links for %s: %+v\n", page.URL, brokenLinks)
 	}
 	seo, err := extractSEO(result.body)
 	if err != nil {
