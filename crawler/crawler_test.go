@@ -676,17 +676,17 @@ func TestAnalyzeReportsAssets(t *testing.T) {
 			SizeBytes:  4,
 		},
 		{
-			URL:        "https://example.test/static/site.css",
-			Type:       "style",
-			StatusCode: http.StatusOK,
-			SizeBytes:  4,
-		},
-		{
 			URL:        "https://example.test/static/broken.js",
 			Type:       "script",
 			StatusCode: http.StatusServiceUnavailable,
 			SizeBytes:  4,
 			Error:      "unexpected http status: 503",
+		},
+		{
+			URL:        "https://example.test/static/site.css",
+			Type:       "style",
+			StatusCode: http.StatusOK,
+			SizeBytes:  4,
 		},
 	}, actual.Pages[0].Assets)
 }

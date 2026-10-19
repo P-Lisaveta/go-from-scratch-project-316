@@ -3,6 +3,7 @@ package crawler
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -552,6 +553,12 @@ func extractAssets(pageURL string, document []byte) ([]Asset, error) {
 	assets := make([]Asset, 0)
 	seen := make(map[string]struct{})
 	collectAssets(node, baseURL, seen, &assets)
+	slices.SortFunc(assets, func(left, right Asset) int {
+		return cmp.Or(
+			strings.Compare(left.Type, right.Type),
+			strings.Compare(left.URL, right.URL),
+		)
+	})
 
 	return assets, nil
 }
