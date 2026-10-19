@@ -173,12 +173,11 @@ func TestAnalyzeReportsOnlyBrokenLinks(t *testing.T) {
 	require.Len(t, actual.Pages, 1)
 	require.Equal(t, "ok", actual.Pages[0].Status)
 	require.Equal(t, []crawler.BrokenLink{
+		{URL: "https://cdn.simple.test/app.js", Error: `Get "https://cdn.simple.test/app.js": host unavailable`},
 		{
 			URL:        "https://simple.test/assets/ghost.css",
 			StatusCode: http.StatusNotFound,
-			Error:      http.StatusText(http.StatusNotFound),
 		},
-		{URL: "https://cdn.simple.test/app.js", Error: `Get "https://cdn.simple.test/app.js": host unavailable`},
 	}, actual.Pages[0].BrokenLinks)
 	require.Equal(t, 4, len(requests))
 	require.Zero(t, requests["mailto:help@simple.test"])
@@ -556,7 +555,6 @@ func TestAnalyzeReportsLastBrokenLinkAttempt(t *testing.T) {
 	require.Equal(t, []crawler.BrokenLink{{
 		URL:        "https://example.test/busy",
 		StatusCode: http.StatusServiceUnavailable,
-		Error:      http.StatusText(http.StatusServiceUnavailable),
 	}}, actual.Pages[0].BrokenLinks)
 	require.Equal(t, 3, busyAttempts)
 }
@@ -639,6 +637,13 @@ func TestAnalyzeReportsAssets(t *testing.T) {
 	actual := decodeReport(t, report)
 	require.Equal(t, []crawler.Asset{
 		{
+			URL:        "https://example.test/static/broken.js",
+			Type:       "script",
+			StatusCode: http.StatusServiceUnavailable,
+			SizeBytes:  4,
+			Error:      "unexpected http status: 503",
+		},
+		{
 			URL:        "https://example.test/static/logo.png",
 			Type:       "image",
 			StatusCode: http.StatusOK,
@@ -649,13 +654,6 @@ func TestAnalyzeReportsAssets(t *testing.T) {
 			Type:       "style",
 			StatusCode: http.StatusOK,
 			SizeBytes:  4,
-		},
-		{
-			URL:        "https://example.test/static/broken.js",
-			Type:       "script",
-			StatusCode: http.StatusServiceUnavailable,
-			SizeBytes:  4,
-			Error:      "unexpected http status: 503",
 		},
 	}, actual.Pages[0].Assets)
 }
@@ -741,7 +739,6 @@ func TestAnalyzeReturnsExpectedJSON(t *testing.T) {
 			"depth": 0,
 			"http_status": 200,
 			"status": "ok",
-			"error": "",
 			"seo": {
 				"has_title": true,
 				"title": "Example title",
@@ -751,15 +748,13 @@ func TestAnalyzeReturnsExpectedJSON(t *testing.T) {
 			},
 			"broken_links": [{
 				"url": "https://example.com/missing",
-				"status_code": 404,
-				"error": "Not Found"
+				"status_code": 404
 			}],
 			"assets": [{
 				"url": "https://example.com/static/logo.png",
 				"type": "image",
 				"status_code": 200,
-				"size_bytes": 12345,
-				"error": ""
+				"size_bytes": 12345
 			}],
 			"discovered_at": "2024-06-01T12:34:56Z"
 		}]

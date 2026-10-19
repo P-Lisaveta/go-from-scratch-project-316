@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +48,7 @@ type Page struct {
 	Depth        int          `json:"depth"`
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
-	Error        string       `json:"error"`
+	Error        string       `json:"error,omitempty"`
 	SEO          SEO          `json:"seo"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	Assets       []Asset      `json:"assets"`
@@ -57,8 +58,8 @@ type Page struct {
 // BrokenLink describes an unavailable link discovered on a page.
 type BrokenLink struct {
 	URL        string `json:"url"`
-	StatusCode int    `json:"status_code"`
-	Error      string `json:"error"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Asset describes a static resource found on a page.
@@ -67,7 +68,7 @@ type Asset struct {
 	Type       string `json:"type"`
 	StatusCode int    `json:"status_code"`
 	SizeBytes  int64  `json:"size_bytes"`
-	Error      string `json:"error"`
+	Error      string `json:"error,omitempty"`
 }
 
 // SEO contains basic search-engine optimization data found on a page.
@@ -154,8 +155,6 @@ func (c *crawler) newPage(task crawlTask) Page {
 	return Page{
 		URL:          task.URL,
 		Depth:        task.Depth,
-		BrokenLinks:  make([]BrokenLink, 0),
-		Assets:       make([]Asset, 0),
 		DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
 }
@@ -170,11 +169,12 @@ func (c *crawler) newReport(pages []Page) Report {
 }
 
 func (c *crawler) visit(rawURL string) bool {
-	if _, exists := c.visited[rawURL]; exists {
+	key := canonicalURL(rawURL)
+	if _, exists := c.visited[key]; exists {
 		return false
 	}
 
-	c.visited[rawURL] = struct{}{}
+	c.visited[key] = struct{}{}
 
 	return true
 }
@@ -244,7 +244,6 @@ func (c *crawler) findBrokenLinks(ctx context.Context, links []string) ([]Broken
 			brokenLinks = append(brokenLinks, BrokenLink{
 				URL:        link,
 				StatusCode: result.statusCode,
-				Error:      http.StatusText(result.statusCode),
 			})
 		}
 	}
@@ -481,6 +480,7 @@ func extractLinks(pageURL string, document []byte) ([]string, error) {
 	links := make([]string, 0)
 	seen := make(map[string]struct{})
 	collectLinks(node, baseURL, seen, &links)
+	slices.Sort(links)
 
 	return links, nil
 }
@@ -524,7 +524,18 @@ func absoluteHTTPURL(baseURL *url.URL, rawURL string) (string, bool) {
 	}
 	link.Fragment = ""
 
-	return link.String(), true
+	return canonicalURL(link.String()), true
+}
+
+func canonicalURL(rawURL string) string {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.Path != "/" {
+		return rawURL
+	}
+	parsedURL.Path = ""
+	parsedURL.RawPath = ""
+
+	return parsedURL.String()
 }
 
 func extractAssets(pageURL string, document []byte) ([]Asset, error) {
@@ -541,6 +552,9 @@ func extractAssets(pageURL string, document []byte) ([]Asset, error) {
 	assets := make([]Asset, 0)
 	seen := make(map[string]struct{})
 	collectAssets(node, baseURL, seen, &assets)
+	slices.SortFunc(assets, func(left, right Asset) int {
+		return strings.Compare(left.URL, right.URL)
+	})
 
 	return assets, nil
 }

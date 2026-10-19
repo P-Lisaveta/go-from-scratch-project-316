@@ -53,7 +53,6 @@ go run ./cmd/hexlet-go-crawler --help
       "depth": 0,
       "http_status": 200,
       "status": "ok",
-      "error": "",
       "seo": {
         "has_title": true,
         "title": "Example title",
@@ -64,8 +63,7 @@ go run ./cmd/hexlet-go-crawler --help
       "broken_links": [
         {
           "url": "https://example.com/missing",
-          "status_code": 404,
-          "error": "Not Found"
+          "status_code": 404
         }
       ],
       "assets": [
@@ -73,8 +71,7 @@ go run ./cmd/hexlet-go-crawler --help
           "url": "https://example.com/static/logo.png",
           "type": "image",
           "status_code": 200,
-          "size_bytes": 12345,
-          "error": ""
+          "size_bytes": 12345
         }
       ],
       "discovered_at": "2024-06-01T12:34:56Z"
@@ -83,7 +80,7 @@ go run ./cmd/hexlet-go-crawler --help
 }
 ```
 
-`root_url` и `depth` описывают запуск, `generated_at` — время формирования отчёта. В `pages` находятся URL, расстояние от стартовой страницы, статус HTTP-запроса, ошибка и время обнаружения. Блок `seo` содержит title, description и наличие h1. `broken_links` перечисляет недоступные ссылки, а `assets` — изображения, скрипты и стили с итоговым статусом и размером в байтах. Все ключи присутствуют всегда; временные поля имеют формат ISO 8601. `IndentJSON` меняет только пробелы и переносы строк.
+`root_url` и `depth` описывают запуск, `generated_at` — время формирования отчёта. В `pages` находятся URL, расстояние от стартовой страницы, статус HTTP-запроса и время обнаружения. Поле `error` добавляется при ошибке загрузки страницы или ассета. Блок `seo` содержит title, description и наличие h1. `broken_links` перечисляет недоступные ссылки, а `assets` — изображения, скрипты и стили с итоговым статусом и размером в байтах. Временные поля имеют формат ISO 8601. `IndentJSON` меняет только пробелы и переносы строк.
 
 Команда `make test` запускает все автоматические тесты. Результат работы — JSON-отчёт с URL корневой страницы, временем формирования и статусом первого HTTP-запроса.
 
