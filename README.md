@@ -6,6 +6,7 @@
 
 Учебный проект Хекслета: https://ru.hexlet.io/programs/go-from-scratch
 
+[Демонстрация работы](https://asciinema.org/a/gEIVHhWUAVSYAcSV)
 
 ## Стек
 
