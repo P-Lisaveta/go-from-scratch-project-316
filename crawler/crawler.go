@@ -49,6 +49,7 @@ type Page struct {
 	Status       string       `json:"status"`
 	Error        string       `json:"error"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
+	Assets       []Asset      `json:"assets"`
 	DiscoveredAt string       `json:"discovered_at"`
 	SEO          SEO          `json:"seo"`
 }
@@ -58,6 +59,15 @@ type BrokenLink struct {
 	URL        string `json:"url"`
 	StatusCode int    `json:"status_code,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// Asset describes a static resource found on a page.
+type Asset struct {
+	URL        string `json:"url"`
+	Type       string `json:"type"`
+	StatusCode int    `json:"status_code"`
+	SizeBytes  int64  `json:"size_bytes"`
+	Error      string `json:"error"`
 }
 
 // SEO contains basic search-engine optimization data found on a page.
@@ -84,8 +94,17 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 type crawler struct {
 	opts        Options
 	visited     map[string]struct{}
+	assetCache  map[string]Asset
 	requestMu   sync.Mutex
+	assetMu     sync.Mutex
 	nextRequest time.Time
+}
+
+type httpResult struct {
+	statusCode         int
+	body               []byte
+	contentLength      int64
+	contentLengthKnown bool
 }
 
 type crawlTask struct {
@@ -95,8 +114,9 @@ type crawlTask struct {
 
 func newCrawler(opts Options) *crawler {
 	return &crawler{
-		opts:    opts,
-		visited: make(map[string]struct{}, 1),
+		opts:       opts,
+		visited:    make(map[string]struct{}, 1),
+		assetCache: make(map[string]Asset),
 	}
 }
 
@@ -135,6 +155,7 @@ func (c *crawler) newPage(task crawlTask) Page {
 		URL:          task.URL,
 		Depth:        task.Depth,
 		BrokenLinks:  make([]BrokenLink, 0),
+		Assets:       make([]Asset, 0),
 		DiscoveredAt: time.Now().UTC().Format(time.RFC3339),
 	}
 }
@@ -159,21 +180,21 @@ func (c *crawler) visit(rawURL string) bool {
 }
 
 func (c *crawler) fetch(ctx context.Context, page Page) (Page, []string) {
-	status, document, err := c.do(ctx, page.URL, true)
+	result, err := c.do(ctx, page.URL, true)
+	page.HTTPStatus = result.statusCode
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
 		return page, nil
 	}
 
-	page.HTTPStatus = status
-	if status < http.StatusOK || status >= http.StatusBadRequest {
+	if result.statusCode < http.StatusOK || result.statusCode >= http.StatusBadRequest {
 		page.Status = "error"
-		page.Error = fmt.Sprintf("unexpected http status: %d", status)
+		page.Error = fmt.Sprintf("unexpected http status: %d", result.statusCode)
 		return page, nil
 	}
 
-	links, err := extractLinks(page.URL, document)
+	links, err := extractLinks(page.URL, result.body)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
@@ -185,7 +206,13 @@ func (c *crawler) fetch(ctx context.Context, page Page) (Page, []string) {
 		page.Error = err.Error()
 		return page, nil
 	}
-	seo, err := extractSEO(document)
+	seo, err := extractSEO(result.body)
+	if err != nil {
+		page.Status = "error"
+		page.Error = err.Error()
+		return page, nil
+	}
+	assets, err := c.findAssets(ctx, page.URL, result.body)
 	if err != nil {
 		page.Status = "error"
 		page.Error = err.Error()
@@ -193,6 +220,7 @@ func (c *crawler) fetch(ctx context.Context, page Page) (Page, []string) {
 	}
 	page.Status = "ok"
 	page.BrokenLinks = brokenLinks
+	page.Assets = assets
 	page.SEO = seo
 
 	return page, links
@@ -204,20 +232,66 @@ func (c *crawler) findBrokenLinks(ctx context.Context, links []string) ([]Broken
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		status, _, err := c.do(ctx, link, false)
+		result, err := c.do(ctx, link, false)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			brokenLinks = append(brokenLinks, BrokenLink{URL: link, Error: err.Error()})
+			brokenLinks = append(brokenLinks, BrokenLink{URL: link, StatusCode: result.statusCode, Error: err.Error()})
 			continue
 		}
-		if status >= http.StatusBadRequest {
-			brokenLinks = append(brokenLinks, BrokenLink{URL: link, StatusCode: status})
+		if result.statusCode >= http.StatusBadRequest {
+			brokenLinks = append(brokenLinks, BrokenLink{URL: link, StatusCode: result.statusCode})
 		}
 	}
 
 	return brokenLinks, nil
+}
+
+func (c *crawler) findAssets(ctx context.Context, pageURL string, document []byte) ([]Asset, error) {
+	discoveredAssets, err := extractAssets(pageURL, document)
+	if err != nil {
+		return nil, err
+	}
+
+	assets := make([]Asset, 0, len(discoveredAssets))
+	for _, asset := range discoveredAssets {
+		assets = append(assets, c.loadAsset(ctx, asset))
+	}
+
+	return assets, nil
+}
+
+func (c *crawler) loadAsset(ctx context.Context, asset Asset) Asset {
+	c.assetMu.Lock()
+	defer c.assetMu.Unlock()
+
+	if cachedAsset, exists := c.assetCache[asset.URL]; exists {
+		return cachedAsset
+	}
+
+	result, err := c.do(ctx, asset.URL, true)
+	asset.StatusCode = result.statusCode
+	if err != nil {
+		asset.SizeBytes = 0
+		asset.Error = err.Error()
+	} else {
+		asset.SizeBytes = assetSize(result)
+	}
+	if err == nil && result.statusCode >= http.StatusBadRequest {
+		asset.Error = fmt.Sprintf("unexpected http status: %d", result.statusCode)
+	}
+	c.assetCache[asset.URL] = asset
+
+	return asset
+}
+
+func assetSize(result httpResult) int64 {
+	if result.contentLengthKnown {
+		return result.contentLength
+	}
+
+	return int64(len(result.body))
 }
 
 func sameDomain(rootURL *url.URL, rawURL string) bool {
@@ -229,19 +303,20 @@ func sameDomain(rootURL *url.URL, rawURL string) bool {
 	return strings.EqualFold(rootURL.Host, link.Host)
 }
 
-func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (int, []byte, error) {
+func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (httpResult, error) {
 	attempts := c.opts.Retries + 1
+	lastResult := httpResult{}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := c.waitForRequest(ctx); err != nil {
-			return 0, nil, err
+			return lastResult, err
 		}
 
 		requestCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
 		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			cancel()
-			return 0, nil, err
+			return lastResult, err
 		}
 		if c.opts.UserAgent != "" {
 			request.Header.Set("User-Agent", c.opts.UserAgent)
@@ -252,39 +327,44 @@ func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (int, []
 			cancel()
 			lastErr = err
 			if err := c.waitForRetry(ctx, attempt, attempts); err != nil {
-				return 0, nil, err
+				return lastResult, err
 			}
 			continue
 		}
 
-		var body []byte
+		result := httpResult{
+			statusCode:         response.StatusCode,
+			contentLength:      response.ContentLength,
+			contentLengthKnown: response.ContentLength > 0 || response.Header.Get("Content-Length") != "",
+		}
 		if readBody {
-			body, err = readResponseBody(response.Body)
+			result.body, err = readResponseBody(response.Body)
 		} else {
 			err = closeResponseBody(response.Body)
 		}
 		cancel()
 		if err != nil {
+			lastResult = result
 			lastErr = err
 			if err := c.waitForRetry(ctx, attempt, attempts); err != nil {
-				return 0, nil, err
+				return lastResult, err
 			}
 			continue
 		}
 		if !isTemporaryStatus(response.StatusCode) {
-			return response.StatusCode, body, nil
+			return result, nil
 		}
 		if err := c.waitForRetry(ctx, attempt, attempts); err != nil {
-			return 0, nil, err
+			return result, err
 		}
 		if attempt+1 < attempts {
 			continue
 		}
 
-		return response.StatusCode, body, nil
+		return result, nil
 	}
 
-	return 0, nil, lastErr
+	return lastResult, lastErr
 }
 
 func (c *crawler) waitForRetry(ctx context.Context, attempt, attempts int) error {
@@ -337,7 +417,6 @@ func (c *crawler) waitForRequest(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
-	c.nextRequest = time.Now().Add(interval)
 
 	return nil
 }
@@ -442,6 +521,87 @@ func absoluteHTTPURL(baseURL *url.URL, rawURL string) (string, bool) {
 	link.Fragment = ""
 
 	return link.String(), true
+}
+
+func extractAssets(pageURL string, document []byte) ([]Asset, error) {
+	baseURL, err := url.Parse(pageURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse page url: %w", err)
+	}
+
+	node, err := html.Parse(bytes.NewReader(document))
+	if err != nil {
+		return nil, fmt.Errorf("parse html: %w", err)
+	}
+
+	assets := make([]Asset, 0)
+	seen := make(map[string]struct{})
+	collectAssets(node, baseURL, seen, &assets)
+
+	return assets, nil
+}
+
+func collectAssets(node *html.Node, baseURL *url.URL, seen map[string]struct{}, assets *[]Asset) {
+	assetType, attribute := assetDetails(node)
+	if assetType != "" {
+		rawURL, found := nodeAttribute(node, attribute)
+		if found {
+			absoluteURL, ok := absoluteHTTPURL(baseURL, rawURL)
+			if ok {
+				if _, exists := seen[absoluteURL]; !exists {
+					seen[absoluteURL] = struct{}{}
+					*assets = append(*assets, Asset{URL: absoluteURL, Type: assetType})
+				}
+			}
+		}
+	}
+
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		collectAssets(child, baseURL, seen, assets)
+	}
+}
+
+func assetDetails(node *html.Node) (string, string) {
+	if node.Type != html.ElementNode {
+		return "", ""
+	}
+
+	switch node.Data {
+	case "img":
+		return "image", "src"
+	case "script":
+		return "script", "src"
+	case "link":
+		if isStylesheet(node) {
+			return "style", "href"
+		}
+	}
+
+	return "", ""
+}
+
+func isStylesheet(node *html.Node) bool {
+	rel, found := nodeAttribute(node, "rel")
+	if !found {
+		return false
+	}
+	for _, value := range strings.Fields(rel) {
+		if strings.EqualFold(value, "stylesheet") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func nodeAttribute(node *html.Node, name string) (string, bool) {
+	for _, attr := range node.Attr {
+		if strings.EqualFold(attr.Key, name) {
+			return attr.Val, true
+		}
+	}
+
+	return "", false
 }
 
 func extractSEO(document []byte) (SEO, error) {

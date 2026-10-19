@@ -601,6 +601,102 @@ func TestAnalyzeStopsRetriesWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestAnalyzeReportsAssets(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.String() {
+		case "https://example.test":
+			return htmlResponse(http.StatusOK, `
+				<img src="/static/logo.png">
+				<link rel="stylesheet" href="/static/site.css">
+				<script src="/static/broken.js"></script>
+			`)
+		case "https://example.test/static/logo.png":
+			return responseWithContentLength(http.StatusOK, "logo", -1)
+		case "https://example.test/static/site.css":
+			return responseWithContentLength(http.StatusOK, "body", 4)
+		case "https://example.test/static/broken.js":
+			return responseWithContentLength(http.StatusServiceUnavailable, "down", 4)
+		default:
+			return nil, errors.New("unexpected request")
+		}
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Depth:      1,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Equal(t, []crawler.Asset{
+		{
+			URL:        "https://example.test/static/logo.png",
+			Type:       "image",
+			StatusCode: http.StatusOK,
+			SizeBytes:  4,
+		},
+		{
+			URL:        "https://example.test/static/site.css",
+			Type:       "style",
+			StatusCode: http.StatusOK,
+			SizeBytes:  4,
+		},
+		{
+			URL:        "https://example.test/static/broken.js",
+			Type:       "script",
+			StatusCode: http.StatusServiceUnavailable,
+			SizeBytes:  4,
+			Error:      "unexpected http status: 503",
+		},
+	}, actual.Pages[0].Assets)
+}
+
+func TestAnalyzeCachesRepeatedAssetsAcrossPages(t *testing.T) {
+	t.Parallel()
+
+	assetRequests := 0
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.String() {
+		case "https://example.test":
+			return htmlResponse(http.StatusOK, `
+				<a href="/next">next</a>
+				<img src="/static/logo.png">
+				<img src="/static/logo.png">
+			`)
+		case "https://example.test/next":
+			return htmlResponse(http.StatusOK, `<img src="/static/logo.png">`)
+		case "https://example.test/static/logo.png":
+			assetRequests++
+			return responseWithContentLength(http.StatusOK, "logo", -1)
+		default:
+			return nil, errors.New("unexpected request")
+		}
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Depth:      2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Len(t, actual.Pages, 2)
+	require.Equal(t, 1, assetRequests)
+	require.Equal(t, []crawler.Asset{{
+		URL:        "https://example.test/static/logo.png",
+		Type:       "image",
+		StatusCode: http.StatusOK,
+		SizeBytes:  4,
+	}}, actual.Pages[0].Assets)
+	require.Equal(t, actual.Pages[0].Assets, actual.Pages[1].Assets)
+}
+
 func decodeReport(t testing.TB, report []byte) crawler.Report {
 	t.Helper()
 
@@ -617,9 +713,14 @@ func (f roundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 }
 
 func htmlResponse(status int, body string) (*http.Response, error) {
+	return responseWithContentLength(status, body, int64(len(body)))
+}
+
+func responseWithContentLength(status int, body string, contentLength int64) (*http.Response, error) {
 	return &http.Response{
-		StatusCode: status,
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
+		StatusCode:    status,
+		ContentLength: contentLength,
+		Body:          io.NopCloser(strings.NewReader(body)),
+		Header:        make(http.Header),
 	}, nil
 }
