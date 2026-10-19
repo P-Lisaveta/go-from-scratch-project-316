@@ -496,10 +496,11 @@ func collectLinks(node *html.Node, baseURL *url.URL, seen map[string]struct{}, l
 			if !ok {
 				continue
 			}
-			if _, exists := seen[absoluteURL]; exists {
+			key := canonicalURL(absoluteURL)
+			if _, exists := seen[key]; exists {
 				continue
 			}
-			seen[absoluteURL] = struct{}{}
+			seen[key] = struct{}{}
 			*links = append(*links, absoluteURL)
 		}
 	}

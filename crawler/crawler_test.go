@@ -190,7 +190,7 @@ func TestAnalyzeChecksRootLinkWithoutRecrawlingRoot(t *testing.T) {
 	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.String() {
 		case "https://example.test":
-			return htmlResponse(http.StatusOK, `<a href="/">home</a><a href="/missing">missing</a>`)
+			return htmlResponse(http.StatusOK, `<a href="/">home</a><a href="https://example.test">home duplicate</a><a href="/missing">missing</a>`)
 		case "https://example.test/":
 			return htmlResponse(http.StatusOK, "home")
 		case "https://example.test/missing":
