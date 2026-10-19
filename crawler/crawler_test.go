@@ -174,7 +174,7 @@ func TestAnalyzeReportsOnlyBrokenLinks(t *testing.T) {
 	require.Len(t, actual.Pages, 1)
 	require.Equal(t, "ok", actual.Pages[0].Status)
 	require.Equal(t, []crawler.BrokenLink{
-		{URL: "https://cdn.simple.test/app.js", Error: `Get "https://cdn.simple.test/app.js": host unavailable`},
+		{URL: "https://cdn.simple.test/app.js", Error: `Head "https://cdn.simple.test/app.js": host unavailable`},
 		{
 			URL:        "https://simple.test/assets/ghost.css",
 			StatusCode: http.StatusNotFound,
@@ -216,44 +216,6 @@ func TestAnalyzeChecksRootLinkWithoutRecrawlingRoot(t *testing.T) {
 		URL:        "https://example.test/missing",
 		StatusCode: http.StatusNotFound,
 	}}, actual.Pages[0].BrokenLinks)
-}
-
-func TestAnalyzeDoesNotCheckLinksToTheCurrentPage(t *testing.T) {
-	t.Parallel()
-
-	requests := make(map[string]int)
-	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
-		requests[request.URL.String()]++
-		switch request.URL.String() {
-		case "https://example.test":
-			return htmlResponse(http.StatusOK, `
-				<a href="/">home</a>
-				<a href="https://EXAMPLE.TEST/#top">home duplicate</a>
-				<a href="/missing">missing</a>
-			`)
-		case "https://example.test/missing":
-			return htmlResponse(http.StatusNotFound, "not found")
-		default:
-			return nil, errors.New("unexpected request")
-		}
-	})}
-
-	report, err := crawler.Analyze(t.Context(), crawler.Options{
-		URL:        "https://example.test",
-		Depth:      1,
-		Timeout:    time.Second,
-		HTTPClient: client,
-	})
-
-	require.NoError(t, err)
-	actual := decodeReport(t, report)
-	require.Equal(t, []crawler.BrokenLink{{
-		URL:        "https://example.test/missing",
-		StatusCode: http.StatusNotFound,
-	}}, actual.Pages[0].BrokenLinks)
-	require.Equal(t, 1, requests["https://example.test"])
-	require.Zero(t, requests["https://example.test/"])
-	require.Zero(t, requests["https://EXAMPLE.TEST/"])
 }
 
 func TestAnalyzeCollectsSEO(t *testing.T) {

@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -228,7 +227,7 @@ func (c *crawler) visit(rawURL string) bool {
 }
 
 func (c *crawler) fetch(ctx context.Context, page Page) (Page, []string) {
-	result, err := c.do(ctx, page.URL, true)
+	result, err := c.do(ctx, http.MethodGet, page.URL, true)
 	page.HTTPStatus = result.statusCode
 	if err != nil {
 		page.Status = "error"
@@ -253,9 +252,6 @@ func (c *crawler) fetch(ctx context.Context, page Page) (Page, []string) {
 		page.Status = "error"
 		page.Error = err.Error()
 		return page, nil
-	}
-	if len(brokenLinks) > 1 {
-		fmt.Fprintf(os.Stderr, "crawler: broken links for %s: %+v\n", page.URL, brokenLinks)
 	}
 	seo, err := extractSEO(result.body)
 	if err != nil {
@@ -283,7 +279,7 @@ func (c *crawler) findBrokenLinks(ctx context.Context, links []string) ([]Broken
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		result, err := c.do(ctx, link, false)
+		result, err := c.do(ctx, http.MethodHead, link, false)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -324,7 +320,7 @@ func (c *crawler) loadAsset(ctx context.Context, asset Asset) Asset {
 		return cachedAsset
 	}
 
-	result, err := c.do(ctx, asset.URL, true)
+	result, err := c.do(ctx, http.MethodGet, asset.URL, true)
 	asset.StatusCode = result.statusCode
 	if err != nil {
 		asset.SizeBytes = 0
@@ -357,7 +353,7 @@ func sameDomain(rootURL *url.URL, rawURL string) bool {
 	return strings.EqualFold(rootURL.Host, link.Host)
 }
 
-func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (httpResult, error) {
+func (c *crawler) do(ctx context.Context, method, rawURL string, readBody bool) (httpResult, error) {
 	attempts := c.opts.Retries + 1
 	lastResult := httpResult{}
 	var lastErr error
@@ -367,7 +363,7 @@ func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (httpRes
 		}
 
 		requestCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
-		request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
+		request, err := http.NewRequestWithContext(requestCtx, method, rawURL, nil)
 		if err != nil {
 			cancel()
 			return lastResult, err
@@ -533,13 +529,13 @@ func extractLinks(pageURL string, document []byte) ([]string, error) {
 
 	links := make([]string, 0)
 	seen := make(map[string]struct{})
-	collectLinks(node, baseURL, canonicalURL(baseURL.String()), seen, &links)
+	collectLinks(node, baseURL, seen, &links)
 	slices.Sort(links)
 
 	return links, nil
 }
 
-func collectLinks(node *html.Node, baseURL *url.URL, baseURLKey string, seen map[string]struct{}, links *[]string) {
+func collectLinks(node *html.Node, baseURL *url.URL, seen map[string]struct{}, links *[]string) {
 	if node.Type == html.ElementNode && (node.Data == "a" || node.Data == "area") {
 		for _, attr := range node.Attr {
 			if attr.Key != "href" {
@@ -550,9 +546,6 @@ func collectLinks(node *html.Node, baseURL *url.URL, baseURLKey string, seen map
 				continue
 			}
 			key := canonicalURL(absoluteURL)
-			if key == baseURLKey {
-				continue
-			}
 			if _, exists := seen[key]; exists {
 				continue
 			}
@@ -562,7 +555,7 @@ func collectLinks(node *html.Node, baseURL *url.URL, baseURLKey string, seen map
 	}
 
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		collectLinks(child, baseURL, baseURLKey, seen, links)
+		collectLinks(child, baseURL, seen, links)
 	}
 }
 
@@ -587,18 +580,11 @@ func absoluteHTTPURL(baseURL *url.URL, rawURL string) (string, bool) {
 
 func canonicalURL(rawURL string) string {
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil {
+	if err != nil || parsedURL.Path != "/" {
 		return rawURL
 	}
-
-	parsedURL.Scheme = strings.ToLower(parsedURL.Scheme)
-	parsedURL.Host = strings.ToLower(parsedURL.Host)
-	parsedURL.Fragment = ""
-	parsedURL.RawFragment = ""
-	if parsedURL.Path == "/" {
-		parsedURL.Path = ""
-		parsedURL.RawPath = ""
-	}
+	parsedURL.Path = ""
+	parsedURL.RawPath = ""
 
 	return parsedURL.String()
 }
