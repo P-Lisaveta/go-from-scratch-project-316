@@ -17,14 +17,16 @@ import (
 	"golang.org/x/net/html"
 )
 
+const retryDelay = 20 * time.Millisecond
+
 // Options controls an analysis run.
 type Options struct {
 	URL         string
 	Depth       int
-	Retries     int
-	Delay       time.Duration
+	Retries     int           // Maximum number of retries after the first request.
+	Delay       time.Duration // Global delay between HTTP requests.
 	Timeout     time.Duration
-	RPS         float64
+	RPS         float64 // Global requests per second; takes precedence over Delay.
 	UserAgent   string
 	Concurrency int
 	IndentJSON  bool
@@ -249,6 +251,9 @@ func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (int, []
 		if err != nil {
 			cancel()
 			lastErr = err
+			if err := c.waitForRetry(ctx, attempt, attempts); err != nil {
+				return 0, nil, err
+			}
 			continue
 		}
 
@@ -261,6 +266,18 @@ func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (int, []
 		cancel()
 		if err != nil {
 			lastErr = err
+			if err := c.waitForRetry(ctx, attempt, attempts); err != nil {
+				return 0, nil, err
+			}
+			continue
+		}
+		if !isTemporaryStatus(response.StatusCode) {
+			return response.StatusCode, body, nil
+		}
+		if err := c.waitForRetry(ctx, attempt, attempts); err != nil {
+			return 0, nil, err
+		}
+		if attempt+1 < attempts {
 			continue
 		}
 
@@ -270,9 +287,29 @@ func (c *crawler) do(ctx context.Context, rawURL string, readBody bool) (int, []
 	return 0, nil, lastErr
 }
 
+func (c *crawler) waitForRetry(ctx context.Context, attempt, attempts int) error {
+	if attempt+1 >= attempts {
+		return nil
+	}
+
+	timer := time.NewTimer(retryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isTemporaryStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+}
+
 func (c *crawler) waitForRequest(ctx context.Context) error {
-	c.requestMu.Lock()
-	defer c.requestMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	interval := c.opts.Delay
 	if c.opts.RPS > 0 {
@@ -282,7 +319,15 @@ func (c *crawler) waitForRequest(ctx context.Context) error {
 		return nil
 	}
 
-	wait := time.Until(c.nextRequest)
+	c.requestMu.Lock()
+	requestAt := time.Now()
+	if c.nextRequest.After(requestAt) {
+		requestAt = c.nextRequest
+	}
+	c.nextRequest = requestAt.Add(interval)
+	c.requestMu.Unlock()
+
+	wait := time.Until(requestAt)
 	if wait > 0 {
 		timer := time.NewTimer(wait)
 		defer timer.Stop()

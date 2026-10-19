@@ -316,6 +316,291 @@ func TestAnalyzeReturnsReportWhenContextIsCanceled(t *testing.T) {
 	require.Empty(t, actual.Pages)
 }
 
+func TestAnalyzeLimitsRequestRate(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name        string
+		delay       time.Duration
+		rps         float64
+		minInterval time.Duration
+		maxInterval time.Duration
+	}{
+		{
+			name:        "delay",
+			delay:       25 * time.Millisecond,
+			minInterval: 25 * time.Millisecond,
+		},
+		{
+			name:        "rps overrides delay",
+			delay:       500 * time.Millisecond,
+			rps:         50,
+			minInterval: 20 * time.Millisecond,
+			maxInterval: 250 * time.Millisecond,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			requestTimes := make([]time.Time, 0, 2)
+			client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+				requestTimes = append(requestTimes, time.Now())
+				if request.URL.String() == "https://simple.test" {
+					return htmlResponse(http.StatusOK, `<a href="/page">page</a>`)
+				}
+
+				return htmlResponse(http.StatusOK, "<html></html>")
+			})}
+
+			report, err := crawler.Analyze(t.Context(), crawler.Options{
+				URL:        "https://simple.test",
+				Depth:      1,
+				Delay:      testCase.delay,
+				RPS:        testCase.rps,
+				Timeout:    time.Second,
+				HTTPClient: client,
+			})
+
+			require.NoError(t, err)
+			actual := decodeReport(t, report)
+			require.Len(t, actual.Pages, 1)
+			require.Equal(t, "ok", actual.Pages[0].Status)
+			require.Len(t, requestTimes, 2)
+
+			interval := requestTimes[1].Sub(requestTimes[0])
+			require.GreaterOrEqual(t, interval, testCase.minInterval)
+			if testCase.maxInterval > 0 {
+				require.Less(t, interval, testCase.maxInterval)
+			}
+		})
+	}
+}
+
+func TestAnalyzeStopsRateLimitWaitOnCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	firstRequestSent := make(chan struct{})
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == "https://simple.test" {
+			close(firstRequestSent)
+			return htmlResponse(http.StatusOK, `<a href="/page">page</a>`)
+		}
+
+		return htmlResponse(http.StatusOK, "<html></html>")
+	})}
+
+	type result struct {
+		report []byte
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		report, err := crawler.Analyze(ctx, crawler.Options{
+			URL:        "https://simple.test",
+			Depth:      1,
+			Delay:      time.Second,
+			Timeout:    time.Second,
+			HTTPClient: client,
+		})
+		done <- result{report: report, err: err}
+	}()
+
+	select {
+	case <-firstRequestSent:
+	case <-time.After(time.Second):
+		t.Fatal("first request was not sent")
+	}
+	cancel()
+
+	select {
+	case actual := <-done:
+		require.NoError(t, actual.err)
+		require.Len(t, decodeReport(t, actual.report).Pages, 1)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("analysis did not stop after context cancellation")
+	}
+}
+
+func TestAnalyzeRetriesNetworkFailureUntilSuccess(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("temporary network failure")
+		}
+
+		return htmlResponse(http.StatusOK, "<html></html>")
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Retries:    2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Equal(t, "ok", actual.Pages[0].Status)
+	require.Equal(t, 2, attempts)
+}
+
+func TestAnalyzeRetriesTemporaryHTTPStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+
+			attempts := 0
+			client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+				attempts++
+				if attempts == 1 {
+					return htmlResponse(status, "temporary failure")
+				}
+
+				return htmlResponse(http.StatusOK, "<html></html>")
+			})}
+
+			report, err := crawler.Analyze(t.Context(), crawler.Options{
+				URL:        "https://example.test",
+				Retries:    2,
+				Timeout:    time.Second,
+				HTTPClient: client,
+			})
+
+			require.NoError(t, err)
+			actual := decodeReport(t, report)
+			require.Equal(t, "ok", actual.Pages[0].Status)
+			require.Equal(t, 2, attempts)
+		})
+	}
+}
+
+func TestAnalyzeStopsAfterRetryLimit(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		attempts++
+		return nil, errors.New("temporary network failure")
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Retries:    2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Equal(t, "error", actual.Pages[0].Status)
+	require.Contains(t, actual.Pages[0].Error, "temporary network failure")
+	require.Equal(t, 3, attempts)
+}
+
+func TestAnalyzeDoesNotRetryPermanentHTTPStatus(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		attempts++
+		return htmlResponse(http.StatusNotFound, "not found")
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Retries:    2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Equal(t, "error", actual.Pages[0].Status)
+	require.Equal(t, 1, attempts)
+}
+
+func TestAnalyzeReportsLastBrokenLinkAttempt(t *testing.T) {
+	t.Parallel()
+
+	busyAttempts := 0
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.URL.String() == "https://example.test" {
+			return htmlResponse(http.StatusOK, `<a href="/busy">busy</a>`)
+		}
+		busyAttempts++
+
+		return htmlResponse(http.StatusServiceUnavailable, "unavailable")
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Depth:      1,
+		Retries:    2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Equal(t, []crawler.BrokenLink{{
+		URL:        "https://example.test/busy",
+		StatusCode: http.StatusServiceUnavailable,
+	}}, actual.Pages[0].BrokenLinks)
+	require.Equal(t, 3, busyAttempts)
+}
+
+func TestAnalyzeStopsRetriesWhenContextIsCanceled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	firstAttempt := make(chan struct{})
+	attempts := 0
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		attempts++
+		close(firstAttempt)
+		return nil, errors.New("temporary network failure")
+	})}
+
+	type result struct {
+		report []byte
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		report, err := crawler.Analyze(ctx, crawler.Options{
+			URL:        "https://example.test",
+			Retries:    2,
+			Timeout:    time.Second,
+			HTTPClient: client,
+		})
+		done <- result{report: report, err: err}
+	}()
+
+	select {
+	case <-firstAttempt:
+	case <-time.After(time.Second):
+		t.Fatal("first request was not sent")
+	}
+	cancel()
+
+	select {
+	case actual := <-done:
+		require.NoError(t, actual.err)
+		require.Len(t, decodeReport(t, actual.report).Pages, 1)
+		require.Equal(t, 1, attempts)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("analysis did not stop after context cancellation")
+	}
+}
+
 func decodeReport(t testing.TB, report []byte) crawler.Report {
 	t.Helper()
 
