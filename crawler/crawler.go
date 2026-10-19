@@ -524,7 +524,7 @@ func absoluteHTTPURL(baseURL *url.URL, rawURL string) (string, bool) {
 	}
 	link.Fragment = ""
 
-	return canonicalURL(link.String()), true
+	return link.String(), true
 }
 
 func canonicalURL(rawURL string) string {
@@ -552,9 +552,6 @@ func extractAssets(pageURL string, document []byte) ([]Asset, error) {
 	assets := make([]Asset, 0)
 	seen := make(map[string]struct{})
 	collectAssets(node, baseURL, seen, &assets)
-	slices.SortFunc(assets, func(left, right Asset) int {
-		return strings.Compare(left.URL, right.URL)
-	})
 
 	return assets, nil
 }

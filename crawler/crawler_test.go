@@ -184,6 +184,39 @@ func TestAnalyzeReportsOnlyBrokenLinks(t *testing.T) {
 	require.Zero(t, requests["https://simple.test/blog/index.html#section"])
 }
 
+func TestAnalyzeChecksRootLinkWithoutRecrawlingRoot(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.String() {
+		case "https://example.test":
+			return htmlResponse(http.StatusOK, `<a href="/">home</a><a href="/missing">missing</a>`)
+		case "https://example.test/":
+			return htmlResponse(http.StatusOK, "home")
+		case "https://example.test/missing":
+			return htmlResponse(http.StatusNotFound, "not found")
+		default:
+			return nil, errors.New("unexpected request")
+		}
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.test",
+		Depth:      2,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	actual := decodeReport(t, report)
+	require.Len(t, actual.Pages, 2)
+	require.Equal(t, "https://example.test/missing", actual.Pages[1].URL)
+	require.Equal(t, []crawler.BrokenLink{{
+		URL:        "https://example.test/missing",
+		StatusCode: http.StatusNotFound,
+	}}, actual.Pages[0].BrokenLinks)
+}
+
 func TestAnalyzeCollectsSEO(t *testing.T) {
 	t.Parallel()
 
@@ -637,13 +670,6 @@ func TestAnalyzeReportsAssets(t *testing.T) {
 	actual := decodeReport(t, report)
 	require.Equal(t, []crawler.Asset{
 		{
-			URL:        "https://example.test/static/broken.js",
-			Type:       "script",
-			StatusCode: http.StatusServiceUnavailable,
-			SizeBytes:  4,
-			Error:      "unexpected http status: 503",
-		},
-		{
 			URL:        "https://example.test/static/logo.png",
 			Type:       "image",
 			StatusCode: http.StatusOK,
@@ -654,6 +680,13 @@ func TestAnalyzeReportsAssets(t *testing.T) {
 			Type:       "style",
 			StatusCode: http.StatusOK,
 			SizeBytes:  4,
+		},
+		{
+			URL:        "https://example.test/static/broken.js",
+			Type:       "script",
+			StatusCode: http.StatusServiceUnavailable,
+			SizeBytes:  4,
+			Error:      "unexpected http status: 503",
 		},
 	}, actual.Pages[0].Assets)
 }
