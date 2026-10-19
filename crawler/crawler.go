@@ -529,13 +529,13 @@ func extractLinks(pageURL string, document []byte) ([]string, error) {
 
 	links := make([]string, 0)
 	seen := make(map[string]struct{})
-	collectLinks(node, baseURL, seen, &links)
+	collectLinks(node, baseURL, canonicalURL(baseURL.String()), seen, &links)
 	slices.Sort(links)
 
 	return links, nil
 }
 
-func collectLinks(node *html.Node, baseURL *url.URL, seen map[string]struct{}, links *[]string) {
+func collectLinks(node *html.Node, baseURL *url.URL, baseURLKey string, seen map[string]struct{}, links *[]string) {
 	if node.Type == html.ElementNode && (node.Data == "a" || node.Data == "area") {
 		for _, attr := range node.Attr {
 			if attr.Key != "href" {
@@ -546,6 +546,9 @@ func collectLinks(node *html.Node, baseURL *url.URL, seen map[string]struct{}, l
 				continue
 			}
 			key := canonicalURL(absoluteURL)
+			if key == baseURLKey {
+				continue
+			}
 			if _, exists := seen[key]; exists {
 				continue
 			}
@@ -555,7 +558,7 @@ func collectLinks(node *html.Node, baseURL *url.URL, seen map[string]struct{}, l
 	}
 
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		collectLinks(child, baseURL, seen, links)
+		collectLinks(child, baseURL, baseURLKey, seen, links)
 	}
 }
 
@@ -580,11 +583,18 @@ func absoluteHTTPURL(baseURL *url.URL, rawURL string) (string, bool) {
 
 func canonicalURL(rawURL string) string {
 	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Path != "/" {
+	if err != nil {
 		return rawURL
 	}
-	parsedURL.Path = ""
-	parsedURL.RawPath = ""
+
+	parsedURL.Scheme = strings.ToLower(parsedURL.Scheme)
+	parsedURL.Host = strings.ToLower(parsedURL.Host)
+	parsedURL.Fragment = ""
+	parsedURL.RawFragment = ""
+	if parsedURL.Path == "/" {
+		parsedURL.Path = ""
+		parsedURL.RawPath = ""
+	}
 
 	return parsedURL.String()
 }
