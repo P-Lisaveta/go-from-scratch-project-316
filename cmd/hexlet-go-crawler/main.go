@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -59,7 +60,15 @@ func run(cliCtx *cli.Context) error {
 		return nil
 	}
 
-	_, err = os.Stdout.Write(append(report, '\n'))
+	return writeReport(os.Stdout, report)
+}
+
+func writeReport(output io.Writer, report []byte) error {
+	if _, err := output.Write(report); err != nil {
+		return err
+	}
+
+	_, err := output.Write([]byte("\n"))
 
 	return err
 }

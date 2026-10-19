@@ -173,7 +173,11 @@ func TestAnalyzeReportsOnlyBrokenLinks(t *testing.T) {
 	require.Len(t, actual.Pages, 1)
 	require.Equal(t, "ok", actual.Pages[0].Status)
 	require.Equal(t, []crawler.BrokenLink{
-		{URL: "https://simple.test/assets/ghost.css", StatusCode: http.StatusNotFound},
+		{
+			URL:        "https://simple.test/assets/ghost.css",
+			StatusCode: http.StatusNotFound,
+			Error:      http.StatusText(http.StatusNotFound),
+		},
 		{URL: "https://cdn.simple.test/app.js", Error: `Get "https://cdn.simple.test/app.js": host unavailable`},
 	}, actual.Pages[0].BrokenLinks)
 	require.Equal(t, 4, len(requests))
@@ -552,6 +556,7 @@ func TestAnalyzeReportsLastBrokenLinkAttempt(t *testing.T) {
 	require.Equal(t, []crawler.BrokenLink{{
 		URL:        "https://example.test/busy",
 		StatusCode: http.StatusServiceUnavailable,
+		Error:      http.StatusText(http.StatusServiceUnavailable),
 	}}, actual.Pages[0].BrokenLinks)
 	require.Equal(t, 3, busyAttempts)
 }
@@ -697,6 +702,94 @@ func TestAnalyzeCachesRepeatedAssetsAcrossPages(t *testing.T) {
 	require.Equal(t, actual.Pages[0].Assets, actual.Pages[1].Assets)
 }
 
+func TestAnalyzeReturnsExpectedJSON(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.String() {
+		case "https://example.com":
+			return htmlResponse(http.StatusOK, `
+				<title>Example title</title>
+				<meta name="description" content="Example description">
+				<h1>Example heading</h1>
+				<a href="/missing">missing</a>
+				<img src="/static/logo.png">
+			`)
+		case "https://example.com/missing":
+			return htmlResponse(http.StatusNotFound, "not found")
+		case "https://example.com/static/logo.png":
+			return responseWithContentLength(http.StatusOK, "asset", 12345)
+		default:
+			return nil, errors.New("unexpected request")
+		}
+	})}
+
+	report, err := crawler.Analyze(t.Context(), crawler.Options{
+		URL:        "https://example.com",
+		Depth:      1,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	})
+
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+		"root_url": "https://example.com",
+		"depth": 1,
+		"generated_at": "2024-06-01T12:34:56Z",
+		"pages": [{
+			"url": "https://example.com",
+			"depth": 0,
+			"http_status": 200,
+			"status": "ok",
+			"error": "",
+			"seo": {
+				"has_title": true,
+				"title": "Example title",
+				"has_description": true,
+				"description": "Example description",
+				"has_h1": true
+			},
+			"broken_links": [{
+				"url": "https://example.com/missing",
+				"status_code": 404,
+				"error": "Not Found"
+			}],
+			"assets": [{
+				"url": "https://example.com/static/logo.png",
+				"type": "image",
+				"status_code": 200,
+				"size_bytes": 12345,
+				"error": ""
+			}],
+			"discovered_at": "2024-06-01T12:34:56Z"
+		}]
+	}`, string(normalizeReportTimes(t, report)))
+}
+
+func TestAnalyzeIndentJSONOnlyChangesFormatting(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		return htmlResponse(http.StatusOK, "<title>Example</title>")
+	})}
+	opts := crawler.Options{
+		URL:        "https://example.test",
+		Depth:      1,
+		Timeout:    time.Second,
+		HTTPClient: client,
+	}
+
+	compact, err := crawler.Analyze(t.Context(), opts)
+	require.NoError(t, err)
+	opts.IndentJSON = true
+	indented, err := crawler.Analyze(t.Context(), opts)
+
+	require.NoError(t, err)
+	require.NotContains(t, string(compact), "\n")
+	require.Contains(t, string(indented), "\n")
+	require.JSONEq(t, string(normalizeReportTimes(t, compact)), string(normalizeReportTimes(t, indented)))
+}
+
 func decodeReport(t testing.TB, report []byte) crawler.Report {
 	t.Helper()
 
@@ -704,6 +797,20 @@ func decodeReport(t testing.TB, report []byte) crawler.Report {
 	require.NoError(t, json.Unmarshal(report, &actual))
 
 	return actual
+}
+
+func normalizeReportTimes(t testing.TB, report []byte) []byte {
+	t.Helper()
+
+	actual := decodeReport(t, report)
+	actual.GeneratedAt = "2024-06-01T12:34:56Z"
+	for index := range actual.Pages {
+		actual.Pages[index].DiscoveredAt = "2024-06-01T12:34:56Z"
+	}
+	normalized, err := json.Marshal(actual)
+	require.NoError(t, err)
+
+	return normalized
 }
 
 type roundTripper func(*http.Request) (*http.Response, error)

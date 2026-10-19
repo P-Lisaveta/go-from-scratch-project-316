@@ -48,17 +48,17 @@ type Page struct {
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
 	Error        string       `json:"error"`
+	SEO          SEO          `json:"seo"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	Assets       []Asset      `json:"assets"`
 	DiscoveredAt string       `json:"discovered_at"`
-	SEO          SEO          `json:"seo"`
 }
 
 // BrokenLink describes an unavailable link discovered on a page.
 type BrokenLink struct {
 	URL        string `json:"url"`
-	StatusCode int    `json:"status_code,omitempty"`
-	Error      string `json:"error,omitempty"`
+	StatusCode int    `json:"status_code"`
+	Error      string `json:"error"`
 }
 
 // Asset describes a static resource found on a page.
@@ -241,7 +241,11 @@ func (c *crawler) findBrokenLinks(ctx context.Context, links []string) ([]Broken
 			continue
 		}
 		if result.statusCode >= http.StatusBadRequest {
-			brokenLinks = append(brokenLinks, BrokenLink{URL: link, StatusCode: result.statusCode})
+			brokenLinks = append(brokenLinks, BrokenLink{
+				URL:        link,
+				StatusCode: result.statusCode,
+				Error:      http.StatusText(result.statusCode),
+			})
 		}
 	}
 

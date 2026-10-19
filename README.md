@@ -40,6 +40,51 @@ go run ./cmd/hexlet-go-crawler --help
 
 Параметр `--retries=N` задаёт число повторов после первой попытки (`Options.Retries`), то есть при `--retries=2` запрос будет выполнен максимум три раза. Повторяются сетевые сбои, `429` и ответы `5xx`; другие `4xx` сразу считаются итоговым результатом. Между повторами краулер делает короткую паузу и прекращает попытки при отмене контекста.
 
+## Формат JSON-отчёта
+
+```json
+{
+  "root_url": "https://example.com",
+  "depth": 1,
+  "generated_at": "2024-06-01T12:34:56Z",
+  "pages": [
+    {
+      "url": "https://example.com",
+      "depth": 0,
+      "http_status": 200,
+      "status": "ok",
+      "error": "",
+      "seo": {
+        "has_title": true,
+        "title": "Example title",
+        "has_description": true,
+        "description": "Example description",
+        "has_h1": true
+      },
+      "broken_links": [
+        {
+          "url": "https://example.com/missing",
+          "status_code": 404,
+          "error": "Not Found"
+        }
+      ],
+      "assets": [
+        {
+          "url": "https://example.com/static/logo.png",
+          "type": "image",
+          "status_code": 200,
+          "size_bytes": 12345,
+          "error": ""
+        }
+      ],
+      "discovered_at": "2024-06-01T12:34:56Z"
+    }
+  ]
+}
+```
+
+`root_url` и `depth` описывают запуск, `generated_at` — время формирования отчёта. В `pages` находятся URL, расстояние от стартовой страницы, статус HTTP-запроса, ошибка и время обнаружения. Блок `seo` содержит title, description и наличие h1. `broken_links` перечисляет недоступные ссылки, а `assets` — изображения, скрипты и стили с итоговым статусом и размером в байтах. Все ключи присутствуют всегда; временные поля имеют формат ISO 8601. `IndentJSON` меняет только пробелы и переносы строк.
+
 Команда `make test` запускает все автоматические тесты. Результат работы — JSON-отчёт с URL корневой страницы, временем формирования и статусом первого HTTP-запроса.
 
 ---
