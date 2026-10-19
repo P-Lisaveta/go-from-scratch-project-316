@@ -114,6 +114,12 @@ type crawlTask struct {
 	Depth int
 }
 
+type crawlResult struct {
+	Page  Page
+	Links []string
+	Done  bool
+}
+
 func newCrawler(opts Options) *crawler {
 	return &crawler{
 		opts:       opts,
@@ -133,23 +139,63 @@ func (c *crawler) crawl(ctx context.Context) Report {
 			break
 		}
 
-		task := queue[0]
-		queue = queue[1:]
-		page, links := c.fetch(ctx, c.newPage(task))
-		pages = append(pages, page)
+		results := c.fetchTasks(ctx, queue)
+		nextQueue := make([]crawlTask, 0)
+		for index, result := range results {
+			if !result.Done {
+				break
+			}
+			pages = append(pages, result.Page)
 
-		if task.Depth+1 >= c.opts.Depth {
-			continue
-		}
-		for _, link := range links {
-			if !sameDomain(rootURL, link) || !c.visit(link) {
+			task := queue[index]
+			if task.Depth+1 >= c.opts.Depth {
 				continue
 			}
-			queue = append(queue, crawlTask{URL: link, Depth: task.Depth + 1})
+			for _, link := range result.Links {
+				if !sameDomain(rootURL, link) || !c.visit(link) {
+					continue
+				}
+				nextQueue = append(nextQueue, crawlTask{URL: link, Depth: task.Depth + 1})
+			}
 		}
+		queue = nextQueue
 	}
 
 	return c.newReport(pages)
+}
+
+func (c *crawler) fetchTasks(ctx context.Context, tasks []crawlTask) []crawlResult {
+	results := make([]crawlResult, len(tasks))
+	jobs := make(chan int, len(tasks))
+	for index := range tasks {
+		jobs <- index
+	}
+	close(jobs)
+
+	workers := min(c.workerCount(), len(tasks))
+	var workersGroup sync.WaitGroup
+	for range workers {
+		workersGroup.Go(func() {
+			for index := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				page, links := c.fetch(ctx, c.newPage(tasks[index]))
+				results[index] = crawlResult{Page: page, Links: links, Done: true}
+			}
+		})
+	}
+	workersGroup.Wait()
+
+	return results
+}
+
+func (c *crawler) workerCount() int {
+	if c.opts.Concurrency > 0 {
+		return c.opts.Concurrency
+	}
+
+	return 1
 }
 
 func (c *crawler) newPage(task crawlTask) Page {
@@ -437,6 +483,9 @@ func validateOptions(opts Options) error {
 	}
 	if opts.Retries < 0 {
 		return errors.New("retries cannot be negative")
+	}
+	if opts.Concurrency < 0 {
+		return errors.New("concurrency cannot be negative")
 	}
 	if opts.RPS < 0 {
 		return errors.New("rps cannot be negative")

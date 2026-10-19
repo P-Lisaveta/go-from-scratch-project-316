@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -328,6 +329,80 @@ func TestAnalyzeCrawlsInternalPagesWithinDepth(t *testing.T) {
 				require.Equal(t, expectedDepth, actual.Pages[index].Depth)
 			}
 		})
+	}
+}
+
+func TestAnalyzeUsesConfiguredWorkerPool(t *testing.T) {
+	t.Parallel()
+
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	var activeRequests atomic.Int32
+	var maxActiveRequests atomic.Int32
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	client := &http.Client{Transport: roundTripper(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.String() {
+		case "https://example.test":
+			return htmlResponse(http.StatusOK, `<a href="/first">first</a><a href="/second">second</a>`)
+		case "https://example.test/first":
+			if firstCalls.Add(1) == 1 {
+				return htmlResponse(http.StatusOK, "first")
+			}
+		case "https://example.test/second":
+			if secondCalls.Add(1) == 1 {
+				return htmlResponse(http.StatusOK, "second")
+			}
+		default:
+			return nil, errors.New("unexpected request")
+		}
+
+		active := activeRequests.Add(1)
+		for {
+			maximum := maxActiveRequests.Load()
+			if active <= maximum || maxActiveRequests.CompareAndSwap(maximum, active) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-release
+		activeRequests.Add(-1)
+
+		return htmlResponse(http.StatusOK, "child")
+	})}
+
+	type analysisResult struct {
+		report []byte
+		err    error
+	}
+	done := make(chan analysisResult, 1)
+	go func() {
+		report, err := crawler.Analyze(t.Context(), crawler.Options{
+			URL:         "https://example.test",
+			Depth:       2,
+			Timeout:     time.Second,
+			Concurrency: 2,
+			HTTPClient:  client,
+		})
+		done <- analysisResult{report: report, err: err}
+	}()
+
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("worker pool did not process child pages concurrently")
+		}
+	}
+	close(release)
+
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		require.Len(t, decodeReport(t, result.report).Pages, 3)
+		require.Equal(t, int32(2), maxActiveRequests.Load())
+	case <-time.After(time.Second):
+		t.Fatal("analysis did not finish")
 	}
 }
 

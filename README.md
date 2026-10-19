@@ -19,6 +19,14 @@ cd go-from-scratch-project-316
 make build
 ```
 
+Подготовьте зависимости и запустите локальную проверку:
+
+```bash
+make setup
+make test
+make lint
+```
+
 ## Использование
 
 Запустите анализ сайта через `make`:
